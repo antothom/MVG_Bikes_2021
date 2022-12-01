@@ -9,22 +9,85 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r loading packages}
+library(tidyverse)
+library(ggmap)
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r loading data, message=FALSE, warning=FALSE}
+# Reading in raw data and formatting variable
+df_rides_2021 <- read_csv2("MVG_Rad_Fahrten_2021.csv") %>%
+  mutate(STARTLAT = as.character(STARTLAT),
+         ENDLAT = as.character(ENDLAT),
+         STARTLON = as.character(STARTLON),
+         ENDLON = as.character(ENDLON)) %>%
+  mutate(STARTLAT = gsub("(.{2})(.*)", "\\1.\\2", STARTLAT),
+         ENDLAT = gsub("(.{2})(.*)", "\\1.\\2", ENDLAT),
+         STARTLON = gsub("(.{2})(.*)", "\\1.\\2", STARTLON),
+         ENDLON = gsub("(.{2})(.*)", "\\1.\\2", ENDLON)) %>%
+   mutate(STARTLAT = as.numeric(STARTLAT),
+         ENDLAT = as.numeric(ENDLAT),
+         STARTLON = as.numeric(STARTLON),
+         ENDLON = as.numeric(ENDLON)) 
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r Bike Stations, message=FALSE, warning=FALSE}
+
+# Filtering for all stations where rides started
+start_stations <- df_rides_2021 %>%
+  filter(!is.na(RENTAL_STATION_NAME)) %>%
+  select(STARTLAT, STARTLON, RENTAL_STATION_NAME) %>%
+  distinct() %>%
+  rename(
+    lat = STARTLAT,
+    lon = STARTLON,
+    station_name = RENTAL_STATION_NAME
+    )
+
+# Filtering for all stations where rides ended
+end_stations <- df_rides_2021 %>%
+  filter(!is.na(RETURN_STATION_NAME)) %>%
+  select(ENDLAT, ENDLON, RETURN_STATION_NAME) %>%
+  distinct() %>%
+  rename(
+    lat = ENDLAT,
+    lon = ENDLON,
+    station_name = RETURN_STATION_NAME
+    )
+
+# Merging all stations
+all_stations <- end_stations %>%
+  anti_join(start_stations, by = "station_name") %>%
+  bind_rows(start_stations)
+
+
+# Remove unnecessary data frames
+rm(start_stations, end_stations)
+
+# Creating bbox to plos
+munich_bbox <- make_bbox(lon = all_stations$lon,
+                         lat = all_stations$lat,
+                         f = c(.26,.05))
+
+# Loading map from osm
+munich <- get_stamenmap(bbox = munich_bbox, zoom = 12, maptype = "terrain")
+
+# Creating a plot with all MVG bike stations
+ggmap(munich) +
+  geom_point(aes(x = lon, y = lat), 
+             data = all_stations, 
+             color='black', 
+             fill='#4562A2', 
+             shape=21) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold")) +
+  labs(x = "Longitude",
+       y = "Latitude",
+       title = "MVG Bike Stations 2021",
+       caption = "Map Data: OpenStreetMap")
+
+# Removing unnecessary data structures
+rm(munich, munich_bbox)
+
+```
+
