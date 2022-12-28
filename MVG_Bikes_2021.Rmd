@@ -2,18 +2,29 @@
 title: "MVG Bikes 2021 - Bike Ride Analysis"
 author: "Antoine Thomas"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r loading packages}
+```{r loading packages, message=FALSE, warning=FALSE, include=FALSE}
 library(tidyverse)
 library(ggmap)
+library(geosphere)
+library(furrr)
+library(parallel)
+library(lubridate)
+library(padr)
+library(RColorBrewer)
+library(factoextra)
 ```
+During the past decade, 
 
+# Loading in Data
 ```{r loading data, message=FALSE, warning=FALSE}
 # Reading in raw data and formatting variable
 df_rides_2021 <- read_csv2("MVG_Rad_Fahrten_2021.csv") %>%
@@ -28,31 +39,43 @@ df_rides_2021 <- read_csv2("MVG_Rad_Fahrten_2021.csv") %>%
    mutate(STARTLAT = as.numeric(STARTLAT),
          ENDLAT = as.numeric(ENDLAT),
          STARTLON = as.numeric(STARTLON),
-         ENDLON = as.numeric(ENDLON)) 
+         ENDLON = as.numeric(ENDLON)) %>%
+  rename(start_time = STARTTIME,
+         end_time = ENDTIME,
+         start_lat = STARTLAT,
+         start_lon = STARTLON,
+         end_lat = ENDLAT,
+         end_lon = ENDLON,
+         rental_is_station = RENTAL_IS_STATION,
+         rental_station_name = RENTAL_STATION_NAME,
+         return_is_station = RETURN_IS_STATION,
+         return_station_name = RETURN_STATION_NAME)
+
 ```
 
+# Bike Stations in Munich
 ```{r Bike Stations, message=FALSE, warning=FALSE}
 
 # Filtering for all stations where rides started
 start_stations <- df_rides_2021 %>%
-  filter(!is.na(RENTAL_STATION_NAME)) %>%
-  select(STARTLAT, STARTLON, RENTAL_STATION_NAME) %>%
+  filter(!is.na(rental_station_name)) %>%
+  select(start_lat, start_lon, rental_station_name) %>%
   distinct() %>%
   rename(
-    lat = STARTLAT,
-    lon = STARTLON,
-    station_name = RENTAL_STATION_NAME
+    lat = start_lat,
+    lon = start_lon,
+    station_name = rental_station_name
     )
 
 # Filtering for all stations where rides ended
 end_stations <- df_rides_2021 %>%
-  filter(!is.na(RETURN_STATION_NAME)) %>%
-  select(ENDLAT, ENDLON, RETURN_STATION_NAME) %>%
+  filter(!is.na(return_station_name)) %>%
+  select(end_lat, end_lon, return_station_name) %>%
   distinct() %>%
   rename(
-    lat = ENDLAT,
-    lon = ENDLON,
-    station_name = RETURN_STATION_NAME
+    lat = end_lat,
+    lon = end_lon,
+    station_name = return_station_name
     )
 
 # Merging all stations
@@ -87,7 +110,160 @@ ggmap(munich) +
        caption = "Map Data: OpenStreetMap")
 
 # Removing unnecessary data structures
-rm(munich, munich_bbox)
+rm(munich)
 
 ```
 
+# Data Cleaning
+```{r Data Cleaning}
+
+munich_bbox_filter <- make_bbox(
+  lon = all_stations$lon,
+  lat = all_stations$lat,
+  f = c(.1, .1)
+)
+
+compute_dist <- function(slon, slat, elon, elat) {
+  m_start_end <- matrix(
+    c(
+      slon, elon,
+      slat, elat
+    ),
+    nrow = 2
+  )
+  colnames(m_start_end) <- c("longitude", "latitude")
+  rownames(m_start_end) <- c("point_1", "point_2")
+  distHaversine(m_start_end) / 1000
+}
+
+plan(multisession, workers = detectCores() - 1)
+df_rides_2021_cl <- df_rides_2021 %>%
+  # Filtering rides out of bbox range
+  mutate(duration = as.numeric(end_time - start_time) / 60) %>%
+  # Filtering out rides shorter than 5 mins and rides longer than 5 hours
+  filter(duration > 3 & duration < 300) %>%
+  # Filtering out rides that are out of the bbox range
+  filter(
+    start_lon > munich_bbox["left"] & start_lon < munich_bbox["right"],
+    end_lon > munich_bbox["left"] & end_lon < munich_bbox["right"],
+    start_lat > munich_bbox["bottom"] & start_lat < munich_bbox["top"],
+    end_lat > munich_bbox["bottom"] & end_lat < munich_bbox["top"]
+  ) %>%
+  # Computing distances between start and end location
+  mutate(distance = as.numeric(future_pmap(.l = list(start_lon, start_lat, end_lon, end_lat), .f = compute_dist))) %>%
+  # Filtering out rides with a higher distance than 300m (except 0m)
+  filter(distance == 0 | distance > 0.3) %>%
+  # Filtering out rides with a distance of 0m and a duration of less than 30 min
+  filter(!(distance == 0 & duration < 30)) %>%
+  mutate(
+    weekday = wday(start_time, label = T),
+    month = month(start_time, label = T)
+  )
+
+rm(munich_bbox_filter)
+
+
+```
+
+# Simple Analysis
+```{r simple analytics, message=FALSE, warning=FALSE}
+# Mean amount of rides on specific weekdays for each month
+
+getSeason <- function(month) {
+    if (month %in% c("Dec","Jan","Feb")) {
+      return("Winter")
+    } else if (month %in% c("Mar", "Apr", "May")) {
+      return("Spring")
+    } else if (month %in% c("Jun", "Jul", "Aug")) {
+      return("Summer")
+    } else {
+      return("Fall")
+    }
+}
+
+color_palette <- colorRampPalette(brewer.pal(8, "Set1"))(12)
+df_rides_2021_cl %>%
+  group_by(weekday, month) %>%
+  summarise(n_rides = n()) %>%
+  ungroup() %>%
+  mutate(
+    month = as.factor(month),
+    season = unlist(map(.x = month, .f = getSeason)),
+    season = factor(season, levels = c("Spring", "Summer", "Fall", "Winter")),
+    weekday = factor(weekday, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+  ) %>%
+  ggplot(aes(x = weekday, y = n_rides, colour = month)) +
+  geom_line(aes(group = month)) +
+  geom_point() +
+  facet_wrap(~season) +
+  scale_colour_manual(values = color_palette) +
+  labs(
+    y = "Amount of rides",
+    x = "Day of the week",
+    colour = "",
+    title = "Amount of bike rides on specific days of the week"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"))
+
+```
+
+# Clustering of Usage Areas
+- Create clusters of usage areas (Start- and End-Point)
+- One Cluster for each Month and Weekday --> Identify the most relevant Clusters
+```{r Usage Area Clustering}
+
+getRides_month_wday <- function(wday, mth) {
+  df_rides_2021_cl %>%
+    filter(
+      weekday == wday,
+      month == mth
+    )
+}
+
+splitted_rides <- expand.grid(
+  weekday = unique(df_rides_2021_cl$weekday),
+  month = unique(df_rides_2021_cl$month)
+) %>%
+  mutate(rides = map2(.x = weekday, .y = month, .f = getRides_month_wday))
+
+
+set.seed(1236)
+# compute total within-cluster sum of squares
+df_rides_2021_cl%>%
+  select(start_lat, start_lon) %>%
+  sample_n(nrow(.)/80) %>%
+  fviz_nbclust(., kmeans, method = "wss", k.max = 15) + 
+  geom_vline(xintercept = 10, colour = "black",  linetype="dotted") +
+  labs(title = "The Elbow Method")
+
+set.seed(21)
+df_rides_2021_cl$cluster <- df_rides_2021_cl %>%
+  select(start_lat, start_lon) %>%
+  kmeans(centers = 15) %>%
+  .$cluster
+
+df_rides_2021_cl <- df_rides_2021_cl %>%
+  mutate(cluster = as.factor(cluster))
+
+hull <- df_rides_2021_cl %>%
+  group_by(cluster) %>%
+  slice(chull(start_lon, start_lat))
+
+#munich <- get_stamenmap(bbox = munich_bbox, zoom = 12, maptype = "terrain")
+color_palette <- colorRampPalette(brewer.pal(8, "Set1"))(15)
+ggmap(munich) +
+  geom_polygon(aes(x = start_lon, y = start_lat, colour = cluster, fill = cluster), 
+             data = hull, alpha = 0.5) +
+  scale_colour_manual(values = color_palette) +
+  scale_fill_manual(values = color_palette) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold")) +
+  labs(x = "Longitude",
+       y = "Latitude",
+       fill = "Area",
+       colour = "Area",
+       title = "Areas of started MVG Bike rides",
+       caption = "Map Data: OpenStreetMap")
+
+```
