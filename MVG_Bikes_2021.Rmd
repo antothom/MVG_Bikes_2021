@@ -3,7 +3,6 @@ title: "MVG Bikes 2021 - Bike Ride Analysis"
 author: "Antoine Thomas"
 date: "`r Sys.Date()`"
 output:
-  pdf_document: default
   html_document: default
 ---
 
@@ -22,7 +21,6 @@ library(padr)
 library(RColorBrewer)
 library(factoextra)
 ```
-During the past decade, 
 
 # Loading in Data
 ```{r loading data, message=FALSE, warning=FALSE}
@@ -115,7 +113,7 @@ rm(munich)
 ```
 
 # Data Cleaning
-```{r Data Cleaning}
+```{r Data Cleaning, message=FALSE, warning=FALSE}
 
 munich_bbox_filter <- make_bbox(
   lon = all_stations$lon,
@@ -167,8 +165,7 @@ rm(munich_bbox_filter)
 
 # Simple Analysis
 ```{r simple analytics, message=FALSE, warning=FALSE}
-# Mean amount of rides on specific weekdays for each month
-
+# Amount of rides on specific weekdays for each month
 getSeason <- function(month) {
     if (month %in% c("Dec","Jan","Feb")) {
       return("Winter")
@@ -206,12 +203,35 @@ df_rides_2021_cl %>%
   theme_bw() +
   theme(plot.title = element_text(face = "bold"))
 
+
+# Average ride duration on specific weekdays for each month
+df_rides_2021_cl %>%
+  group_by(weekday, month) %>%
+  summarise(avg_ride_time = mean(duration)) %>%
+  ungroup() %>%
+  mutate(
+    month = as.factor(month),
+    season = unlist(map(.x = month, .f = getSeason)),
+    season = factor(season, levels = c("Spring", "Summer", "Fall", "Winter")),
+    weekday = factor(weekday, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+  ) %>%
+  ggplot(aes(x = weekday, y = avg_ride_time, colour = month)) +
+  geom_line(aes(group = month)) +
+  geom_point() +
+  facet_wrap(~season) +
+  scale_colour_manual(values = color_palette) +
+  labs(
+    y = "Average ride duration (min)",
+    x = "Day of the week",
+    colour = "",
+    title = "Average bike ride duration on specific days of the week"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"))
 ```
 
 # Clustering of Usage Areas
-- Create clusters of usage areas (Start- and End-Point)
-- One Cluster for each Month and Weekday --> Identify the most relevant Clusters
-```{r Usage Area Clustering}
+```{r Usage Area Clustering, message=FALSE, warning=FALSE}
 
 getRides_month_wday <- function(wday, mth) {
   df_rides_2021_cl %>%
@@ -227,16 +247,6 @@ splitted_rides <- expand.grid(
 ) %>%
   mutate(rides = map2(.x = weekday, .y = month, .f = getRides_month_wday))
 
-
-set.seed(1236)
-# compute total within-cluster sum of squares
-df_rides_2021_cl%>%
-  select(start_lat, start_lon) %>%
-  sample_n(nrow(.)/80) %>%
-  fviz_nbclust(., kmeans, method = "wss", k.max = 15) + 
-  geom_vline(xintercept = 10, colour = "black",  linetype="dotted") +
-  labs(title = "The Elbow Method")
-
 set.seed(21)
 df_rides_2021_cl$cluster <- df_rides_2021_cl %>%
   select(start_lat, start_lon) %>%
@@ -250,7 +260,8 @@ hull <- df_rides_2021_cl %>%
   group_by(cluster) %>%
   slice(chull(start_lon, start_lat))
 
-#munich <- get_stamenmap(bbox = munich_bbox, zoom = 12, maptype = "terrain")
+munich <- get_stamenmap(bbox = munich_bbox, zoom = 12, maptype = "terrain")
+
 color_palette <- colorRampPalette(brewer.pal(8, "Set1"))(15)
 ggmap(munich) +
   geom_polygon(aes(x = start_lon, y = start_lat, colour = cluster, fill = cluster), 
